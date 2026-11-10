@@ -1,5 +1,6 @@
 # Secrets stay out of Git. Each part keeps its own rules in its own .gitignore.
 .env
+env/*
 
 # Tools and editors
 node_modules/
