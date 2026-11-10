@@ -1,0 +1,7 @@
+# One row per finished activity of this project. Written by docs_maintainer after the
+# user approves it; see the activity-metrics skill. Review findings: high, medium and low,
+# without notes of information only. Budget columns (duration_hours, tokens, cost_usd)
+# stay empty when the number is unknown.
+activity,date,name,review_high,review_medium,review_low,readback_failures,manual_findings,questions,plan_changes,production_errors,duration_hours,tokens,cost_usd,notes
+001,2026-11-08,task-list-with-sign-in,0,2,5,3,2,6,2,0,,,,"First security review: 2 medium, 5 low, all fixed or accepted; the second review added 3 small tests. The manual run of the Docker test stack found the shared test database stopping early and the test user unable to create its caches. Budget not recorded."
+002,2026-11-10,database-review-of-the-task-list,0,0,5,1,0,1,1,0,,,,"The database review that 001 planned but never received: 4 low findings, then 1 low in the re-review (a dbname query parameter got past the new test guard). Findings 1 and 2 fixed and re-reviewed twice; 3 and 4 stay open. One write reported success but left the old file; the read-back caught it. Budget not recorded."

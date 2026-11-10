@@ -1,0 +1,7 @@
+# Repositories of this project. bin/work adds each path as a writable folder.
+
+[[repo]]
+key = "<key>"
+name = "<repository>"
+path = "~/<path to the repository>"
+context = "repos/<key>.md"

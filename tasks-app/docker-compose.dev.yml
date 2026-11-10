@@ -1,0 +1,45 @@
+# Development: code is mounted, both servers reload on change.
+# Run: docker compose -f docker-compose.dev.yml up --build
+# Open: http://localhost:5173
+name: tasks-dev
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: tasks
+      POSTGRES_USER: tasks
+      POSTGRES_PASSWORD: dev-only-password
+    volumes:
+      - dev-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tasks -d tasks"]
+      interval: 2s
+      retries: 30
+
+  backend:
+    build: { context: ./backend, target: dev }
+    environment:
+      TASKS_DATABASE_URL: postgresql+psycopg://tasks:dev-only-password@db:5432/tasks
+      TASKS_JWT_SECRET: dev-only-secret-never-use-it-anywhere-else
+      TASKS_COOKIE_SECURE: "false"
+      TASKS_API_DOCS: "true"
+    volumes:
+      - ./backend:/app
+    depends_on:
+      db: { condition: service_healthy }
+
+  webapp:
+    build: { context: ./webapp, target: dev }
+    environment:
+      TASKS_BACKEND_URL: http://backend:8000
+    ports:
+      - "127.0.0.1:5173:5173"
+    volumes:
+      - ./webapp:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+
+volumes:
+  dev-db:

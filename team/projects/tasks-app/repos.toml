@@ -1,0 +1,8 @@
+# Repositories of the tasks app. bin/work adds each path as a writable folder.
+# "~" means the user's home folder. Change a path here if a repository moves.
+
+[[repo]]
+key = "tasks"
+name = "tasks-app"
+path = "~/work/tasks-app"
+context = "repos/tasks.md"

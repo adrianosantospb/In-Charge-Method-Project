@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Basic Memory over the team's memory. Its index lives in .basic-memory/, out of Git.
+#
+#   bin/memory index                     index the memory files now
+#   bin/memory search QUERY [--path DIR] search, as the agents do
+#   bin/memory context NOTE              follow a note's links (e.g. memory/agents/fixer)
+#   bin/memory status                    show the index status
+#   bin/memory mcp                       run the MCP server (Codex starts it by itself)
+#   bin/memory <command> [...]           any other basic-memory command
+set -euo pipefail
+
+TEAM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VERSION="1.0.0"
+PROJECT="team"
+
+export BASIC_MEMORY_CONFIG_DIR="$TEAM_DIR/.basic-memory"
+# Never rewrite the memory files: every file already carries its permalink.
+export BASIC_MEMORY_ENSURE_FRONTMATTER_ON_SYNC=false
+export BASIC_MEMORY_PERMALINKS_INCLUDE_PROJECT=false
+export BASIC_MEMORY_CLI_OUTPUT_STYLE="${BASIC_MEMORY_CLI_OUTPUT_STYLE:-plain}"
+
+bm() {
+  if command -v uvx >/dev/null 2>&1; then
+    uvx --quiet --from "basic-memory==$VERSION" basic-memory "$@"
+  elif command -v basic-memory >/dev/null 2>&1; then
+    basic-memory "$@"
+  else
+    echo "Basic Memory is not available. Install uv (https://docs.astral.sh/uv/) or basic-memory $VERSION." >&2
+    exit 1
+  fi
+}
+
+ensure_project() {
+  if ! bm project list --json 2>/dev/null | grep -q "\"$PROJECT\""; then
+    bm project add "$PROJECT" "$TEAM_DIR" >/dev/null 2>&1 || true
+    bm project default "$PROJECT" >/dev/null 2>&1 || true
+  fi
+}
+
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  mcp)
+    ensure_project >&2
+    exec_args=(mcp --project "$PROJECT")
+    if command -v uvx >/dev/null 2>&1; then
+      exec uvx --quiet --from "basic-memory==$VERSION" basic-memory "${exec_args[@]}"
+    fi
+    exec basic-memory "${exec_args[@]}"
+    ;;
+  index)
+    ensure_project
+    bm project index "$PROJECT" "$@"
+    ;;
+  search)
+    ensure_project
+    bm tool search --project "$PROJECT" "$@"
+    ;;
+  context)
+    ensure_project
+    bm tool context --project "$PROJECT" "$@"
+    ;;
+  status)
+    ensure_project
+    bm status --project "$PROJECT" "$@"
+    ;;
+  ""|-h|--help|help)
+    sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+  *)
+    ensure_project
+    bm "$cmd" "$@"
+    ;;
+esac

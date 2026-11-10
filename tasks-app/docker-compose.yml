@@ -1,0 +1,41 @@
+# Production-like stack: nginx serves the webapp and forwards /api to the backend.
+# Needs a .env file next to this one (copy .env.example).
+# Run: docker compose up --build -d
+# Open: http://localhost:8080 (put HTTPS in front of it for real use)
+name: tasks
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: tasks
+      POSTGRES_USER: tasks
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tasks -d tasks"]
+      interval: 2s
+      retries: 30
+    restart: unless-stopped
+
+  backend:
+    build: { context: ./backend, target: production }
+    environment:
+      TASKS_DATABASE_URL: postgresql+psycopg://tasks:${POSTGRES_PASSWORD}@db:5432/tasks
+      TASKS_JWT_SECRET: ${TASKS_JWT_SECRET:?Set TASKS_JWT_SECRET in .env}
+      TASKS_COOKIE_SECURE: ${TASKS_COOKIE_SECURE:-true}
+    depends_on:
+      db: { condition: service_healthy }
+    restart: unless-stopped
+
+  web:
+    build: { context: ./webapp, target: production }
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  db:

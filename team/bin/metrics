@@ -1,0 +1,588 @@
+#!/usr/bin/env python3
+"""Builds metrics/dashboard.html from metrics/<project>.csv.
+
+The metrics belong to the team. Each project the team works on, the team repository
+included, has one file in metrics/, with one row per finished activity. The documentation
+maintainer adds the row after the user approves it (see the activity-metrics skill), then
+runs:
+
+    bin/metrics                    # rebuild the dashboard
+    bin/metrics --check            # only validate the CSV files
+    bin/metrics --new <project>    # start metrics/<project>.csv with its header
+    bin/metrics --budget --since <time> --until <time> [--cwd <path>]...
+                                   # hours, tokens and cost of an activity, from the
+                                   # Codex session files in ~/.codex/sessions
+
+The dashboard is one static HTML file with no external scripts. Open it in a browser.
+"""
+
+import csv
+import datetime as dt
+import html
+import json
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+OUT = ROOT / "metrics" / "dashboard.html"
+
+COLUMNS = {
+    "activity": str,
+    "date": str,
+    "name": str,
+    "review_high": int,
+    "review_medium": int,
+    "review_low": int,
+    "readback_failures": int,
+    "manual_findings": int,
+    "questions": int,
+    "plan_changes": int,
+    "production_errors": int,
+    "duration_hours": "optional_float",
+    "tokens": "optional_int",
+    "cost_usd": "optional_float",
+    "notes": str,
+}
+
+
+def load() -> tuple[list[str], list[dict], list[str]]:
+    projects, rows, errors = [], [], []
+    for path in sorted((ROOT / "metrics").glob("*.csv")):
+        project = path.stem
+        projects.append(project)
+        with path.open(newline="") as handle:
+            reader = csv.DictReader(line for line in handle if not line.startswith("#"))
+            missing = set(COLUMNS) - set(reader.fieldnames or [])
+            if missing:
+                errors.append(f"{path.relative_to(ROOT)}: missing columns {sorted(missing)}")
+                continue
+            for number, raw in enumerate(reader, start=2):
+                row = {"project": project}
+                for column, kind in COLUMNS.items():
+                    value = (raw.get(column) or "").strip()
+                    if kind in ("optional_int", "optional_float"):
+                        # Budget columns may stay empty when the number is unknown.
+                        try:
+                            row[column] = None if value == "" else (int(value) if kind == "optional_int" else float(value))
+                        except ValueError:
+                            errors.append(f"{path.relative_to(ROOT)} line {number}: {column} must be a number or empty")
+                            row[column] = None
+                    elif kind is int:
+                        if not value.isdigit():
+                            errors.append(f"{path.relative_to(ROOT)} line {number}: {column} must be a whole number")
+                            value = "0"
+                        row[column] = int(value)
+                    else:
+                        row[column] = value
+                try:
+                    dt.date.fromisoformat(row["date"])
+                except ValueError:
+                    errors.append(f"{path.relative_to(ROOT)} line {number}: date must be YYYY-MM-DD")
+                rows.append(row)
+    return projects, rows, errors
+
+
+HEADER = """# One row per finished activity of this project. Written by docs_maintainer after the
+# user approves it; see the activity-metrics skill. Review findings: high, medium and low,
+# without notes of information only. Budget columns (duration_hours, tokens, cost_usd)
+# stay empty when the number is unknown.
+""" + ",".join(COLUMNS) + "\n"
+
+
+PRICES = ROOT / "metrics" / "prices.json"
+USAGE_BUDGET = "usage: bin/metrics --budget --since <time> --until <time> [--cwd <path>]... [--sessions <dir>]..."
+TOKEN_KEYS = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens")
+
+
+def parse_time(text: str) -> dt.datetime:
+    """ISO 8601 time; without a time zone it is the machine's local time."""
+    value = dt.datetime.fromisoformat(text.strip().replace("Z", "+00:00"))
+    if value.tzinfo is None:
+        value = value.astimezone()
+    return value.astimezone(dt.timezone.utc)
+
+
+def option_values(name: str) -> list[str] | None:
+    """Values of a repeatable option; None when the option is given without a value."""
+    values = []
+    for i, arg in enumerate(sys.argv):
+        if arg == name:
+            if i + 1 >= len(sys.argv) or sys.argv[i + 1].startswith("--"):
+                return None
+            values.append(sys.argv[i + 1])
+    return values
+
+
+def printable(value: object) -> str:
+    """A string from a session file, safe to print: no control or escape characters."""
+    if not isinstance(value, str):
+        return "?"
+    return "".join(c if c.isprintable() else "?" for c in value)[:200]
+
+
+def same_or_inside(folder: str, roots: list[str]) -> bool:
+    candidates = {folder}
+    try:
+        candidates.add(str(Path(folder).resolve()))
+    except (OSError, ValueError):
+        pass
+    return any(c == r or c.startswith(r.rstrip("/") + "/") for c in candidates for r in roots)
+
+
+def session_usage(path: Path, since: dt.datetime, until: dt.datetime) -> dict | None:
+    """Tokens of one Codex session file inside [since, until], by model.
+
+    Only session_meta, turn_context and token_count lines are parsed; the other lines,
+    which hold the conversation, are skipped before they are parsed. Each token_count
+    event carries the running total of the session, so the usage in the interval is the
+    growth of that total between events inside the interval.
+
+    A forked session starts with a copy of its parent's history, with the parent's
+    timestamps. Events dated before the session's own start (its first session_meta)
+    only set the baseline and are never counted, so the parent is not counted twice.
+    """
+    meta = {"id": path.stem, "cwd": "", "forked": False}
+    started = None
+    model = "unknown"
+    previous: dict[str, int] = {}
+    by_model: dict[str, dict[str, int]] = {}
+    seen = False
+    with path.open(encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if '"session_meta"' not in line and '"turn_context"' not in line and '"token_count"' not in line:
+                continue
+            try:
+                entry = json.loads(line)
+            except (json.JSONDecodeError, RecursionError):
+                continue
+            if not isinstance(entry, dict) or not isinstance(entry.get("payload"), dict):
+                continue
+            payload, kind = entry["payload"], entry.get("type")
+            try:
+                when = parse_time(entry["timestamp"]) if isinstance(entry.get("timestamp"), str) else None
+            except ValueError:
+                when = None
+            if kind == "session_meta":
+                if started is None:  # later session_meta lines are copies from a parent
+                    started = when
+                    if isinstance(payload.get("id"), str):
+                        meta["id"] = payload["id"]
+                    if isinstance(payload.get("cwd"), str):
+                        meta["cwd"] = payload["cwd"]
+                    meta["forked"] = bool(payload.get("forked_from_id"))
+                continue
+            if kind == "turn_context":
+                if isinstance(payload.get("model"), str) and payload["model"]:
+                    model = payload["model"]
+                continue
+            if kind != "event_msg" or payload.get("type") != "token_count" or when is None:
+                continue
+            info = payload.get("info")
+            total = info.get("total_token_usage") if isinstance(info, dict) else None
+            if not isinstance(total, dict):
+                continue
+            current = {k: total[k] for k in TOKEN_KEYS if isinstance(total.get(k), int) and not isinstance(total.get(k), bool)}
+            counts = since <= when <= until and (started is None or when >= started)
+            if counts:
+                seen = True
+                usage = by_model.setdefault(model, {})
+                for key, value in current.items():
+                    before = previous.get(key, 0)
+                    # A running total that goes down was reset: all of the new value is growth.
+                    usage[key] = usage.get(key, 0) + (value - before if value >= before else value)
+            previous = current
+    if not seen:
+        return None
+    return {**meta, "by_model": by_model}
+
+
+def load_prices() -> tuple[dict, list[str]]:
+    """Valid prices by model, and problems found in metrics/prices.json."""
+    if not PRICES.exists():
+        return {}, []
+    try:
+        data = json.loads(PRICES.read_text())
+    except (json.JSONDecodeError, OSError) as error:
+        return {}, [f"{PRICES.relative_to(ROOT)} is not valid JSON ({type(error).__name__})"]
+    if not isinstance(data, dict):
+        return {}, [f"{PRICES.relative_to(ROOT)} must be a JSON object"]
+    prices, problems = {}, []
+
+    def number(value: object) -> bool:
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and value == value and 0 <= value < float("inf")
+
+    for name, price in data.items():
+        if name.startswith("_"):
+            continue
+        if (
+            isinstance(price, dict)
+            and number(price.get("input"))
+            and number(price.get("output"))
+            and ("cached_input" not in price or number(price["cached_input"]))
+        ):
+            prices[name] = price
+        else:
+            problems.append(f"{PRICES.relative_to(ROOT)}: price of {printable(name)} needs non-negative numbers for input and output (and cached_input, if given)")
+    return prices, problems
+
+
+def default_session_folders() -> list[Path]:
+    home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+    return [folder for folder in (home / "sessions", home / "archived_sessions") if folder.is_dir()] or [home / "sessions"]
+
+
+def budget() -> int:
+    since_text, until_text = option_values("--since"), option_values("--until")
+    folder_args, cwd_args = option_values("--sessions"), option_values("--cwd")
+    if None in (since_text, until_text, folder_args, cwd_args) or len(since_text) != 1 or len(until_text) != 1:
+        print(USAGE_BUDGET, file=sys.stderr)
+        return 2
+    try:
+        since, until = parse_time(since_text[0]), parse_time(until_text[0])
+    except ValueError:
+        print("invalid time: use ISO 8601, for example 2026-11-09T14:30-03:00 or 2026-11-09T17:30Z", file=sys.stderr)
+        return 2
+    if until <= since:
+        print("--until must be after --since", file=sys.stderr)
+        return 2
+    folders = [Path(p).expanduser() for p in folder_args] or default_session_folders()
+    cwds = []
+    for p in cwd_args:
+        raw = str(Path(p).expanduser())
+        cwds += [raw, str(Path(raw).resolve())]
+
+    sessions = []
+    scanned = recent = unreadable = 0
+    other_folders: dict[str, int] = {}
+    for folder in folders:
+        if not folder.is_dir():
+            print(f"{folder}: not found", file=sys.stderr)
+            return 1
+        for path in sorted(folder.rglob("*.jsonl")):
+            try:
+                if path.is_symlink() or not path.is_file():
+                    continue
+                scanned += 1
+                if dt.datetime.fromtimestamp(path.stat().st_mtime, dt.timezone.utc) < since:
+                    continue
+                recent += 1
+                usage = session_usage(path, since, until)
+            except (OSError, ValueError, TypeError, AttributeError, RecursionError):
+                unreadable += 1
+                continue
+            if usage is None:
+                continue
+            if cwds and not same_or_inside(usage["cwd"], cwds):
+                key = printable(usage["cwd"]) or "(no folder recorded)"
+                other_folders[key] = other_folders.get(key, 0) + 1
+                continue
+            sessions.append(usage)
+
+    prices, problems = load_prices()
+    tokens = 0
+    cost = 0.0
+    missing: set[str] = set()
+    zone = "" if any(t.strip().endswith(("Z", "z")) or "+" in t[10:] or "-" in t[10:] for t in since_text + until_text) else ", local time zone assumed"
+    print(f"Interval: {since.isoformat()} to {until.isoformat()} (UTC{zone})")
+    print(f"Session files: {scanned} in {', '.join(str(f) for f in folders)}; {recent} changed since the start of the interval")
+    if unreadable:
+        print(f"Files that could not be read: {unreadable}")
+    print(f"Sessions with token events in the interval: {len(sessions)}")
+    for s in sessions:
+        session_tokens = sum(u.get("total_tokens", 0) for u in s["by_model"].values())
+        tokens += session_tokens
+        models = ", ".join(printable(m) for m in sorted(s["by_model"]))
+        fork = "  (fork)" if s["forked"] else ""
+        print(f"  {printable(s['id'])}  {session_tokens:>12,} tokens  {models}  {printable(s['cwd'])}{fork}")
+        for model, u in s["by_model"].items():
+            price = prices.get(model)
+            if not price:
+                missing.add(printable(model))
+                continue
+            cached = u.get("cached_input_tokens", 0)
+            fresh = max(0, u.get("input_tokens", 0) - cached)
+            cost += (
+                fresh * price["input"]
+                + cached * price.get("cached_input", price["input"])
+                + u.get("output_tokens", 0) * price["output"]
+            ) / 1_000_000
+    if other_folders:
+        print("Left out by --cwd:")
+        for name, count in sorted(other_folders.items()):
+            print(f"  {count} session(s) in {name}")
+    for problem in problems:
+        print(problem)
+    hours = (until - since).total_seconds() / 3600
+    cost_text = "" if missing or not sessions else f"{cost:.2f}"
+    if missing:
+        print(f"No valid price in {PRICES.relative_to(ROOT)} for: {', '.join(sorted(missing))}. cost_usd stays empty.")
+    print()
+    print("duration_hours,tokens,cost_usd")
+    print(f"{hours:.1f},{tokens if sessions else ''},{cost_text}")
+    if cost_text:
+        print("Cost at API prices; on a subscription plan it is not the amount paid.")
+    return 0
+
+
+def main() -> int:
+    if "--budget" in sys.argv:
+        return budget()
+    if "--new" in sys.argv:
+        name = sys.argv[sys.argv.index("--new") + 1] if len(sys.argv) > sys.argv.index("--new") + 1 else ""
+        if not name or not all(c.isalnum() or c in "-_" for c in name):
+            print("usage: bin/metrics --new <project>", file=sys.stderr)
+            return 2
+        path = ROOT / "metrics" / f"{name}.csv"
+        if path.exists():
+            print(f"{path.relative_to(ROOT)} already exists", file=sys.stderr)
+            return 1
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(HEADER)
+        print(f"{path.relative_to(ROOT)}: created")
+        return 0
+    projects, rows, errors = load()
+    for error in errors:
+        print(error, file=sys.stderr)
+    if errors:
+        return 1
+    if "--check" in sys.argv:
+        print(f"{len(rows)} activities in {len(projects)} projects: OK")
+        return 0
+    page = TEMPLATE.replace(
+        "__DATA__", json.dumps(rows, ensure_ascii=False).replace("</", "<\\/")
+    ).replace("__PROJECTS__", json.dumps(projects, ensure_ascii=False).replace("</", "<\\/")).replace("__GENERATED__", html.escape(dt.date.today().isoformat()))
+    OUT.parent.mkdir(exist_ok=True)
+    OUT.write_text(page)
+    print(f"{OUT.relative_to(ROOT)}: {len(rows)} activities")
+    return 0
+
+
+TEMPLATE = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Team metrics</title>
+<style>
+.viz-root {
+  color-scheme: light;
+  --page: #f3f4f1; --surface-1: #fcfcfb; --line: #dcdfd9; --grid: #e8eae6;
+  --text-primary: #0b0b0b; --text-secondary: #52514e; --text-muted: #6d6c67;
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
+  --critical: #d03b3b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) .viz-root {
+    color-scheme: dark;
+    --page: #121211; --surface-1: #1a1a19; --line: #34342f; --grid: #2a2a27;
+    --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #a3a29a;
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+  }
+}
+:root[data-theme="dark"] .viz-root {
+  color-scheme: dark;
+  --page: #121211; --surface-1: #1a1a19; --line: #34342f; --grid: #2a2a27;
+  --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #a3a29a;
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: #f3f4f1; }
+@media (prefers-color-scheme: dark) { body { background: #121211; } }
+.viz-root {
+  min-height: 100vh; background: var(--page); color: var(--text-primary);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 28px 16px 64px;
+}
+.wrap { max-width: 1080px; margin: 0 auto; display: grid; gap: 20px; }
+.wrap > * { min-width: 0; }
+header h1 { font-size: 1.5rem; margin: 0 0 4px; }
+header p { margin: 0; color: var(--text-secondary); }
+.controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.controls label { color: var(--text-secondary); font-size: 0.9rem; }
+select { font: inherit; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface-1); color: var(--text-primary); }
+select:focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+.tile, .card { background: var(--surface-1); border: 1px solid var(--line); border-radius: 8px; padding: 16px; }
+.tile .value { font-size: 2rem; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.tile .label { color: var(--text-secondary); font-size: 0.9rem; }
+.tile .detail { color: var(--text-muted); font-size: 0.8rem; margin-top: 4px; }
+.card h2 { font-size: 1rem; margin: 0 0 4px; }
+.card > p { margin: 0 0 14px; color: var(--text-secondary); font-size: 0.9rem; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 12px; }
+.legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+.bars { display: grid; gap: 10px; }
+.bar-row { display: grid; grid-template-columns: minmax(90px, 160px) 1fr 3ch; gap: 10px; align-items: center; font-size: 0.9rem; }
+.bar-row .name { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-row .total { color: var(--text-secondary); font-variant-numeric: tabular-nums; text-align: right; }
+.track { display: flex; gap: 2px; height: 22px; }
+.seg { height: 100%; min-width: 4px; position: relative; cursor: default; }
+.seg:first-child { border-radius: 4px 0 0 4px; }
+.seg:last-child { border-radius: 0 4px 4px 0; }
+.seg:only-child { border-radius: 4px; }
+.seg:hover, .seg:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 1px; }
+.empty { color: var(--text-muted); font-size: 0.9rem; }
+.tip { position: fixed; pointer-events: none; background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; font-size: 0.85rem; box-shadow: 0 2px 8px rgba(0,0,0,.12); display: none; z-index: 5; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 0.875rem; font-variant-numeric: tabular-nums; }
+th, td { text-align: right; padding: 7px 10px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th { color: var(--text-secondary); font-weight: 600; border-bottom: 1px solid var(--line); }
+th:first-child, td:first-child, th.text, td.text { text-align: left; }
+td.notes { white-space: normal; min-width: 260px; text-align: left; color: var(--text-secondary); }
+.prod { color: var(--critical); font-weight: 600; }
+.prod::before { content: "\26A0\FE0E  "; }
+footer { color: var(--text-muted); font-size: 0.8rem; }
+button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface-1); color: var(--text-primary); cursor: pointer; }
+button:hover { border-color: var(--text-secondary); }
+button:focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; }
+.print-title { display: none; }
+@media print {
+  .viz-root { background: #fff; color: #000; padding: 0; min-height: 0; }
+  .controls, .tip { display: none !important; }
+  .print-title { display: block; margin: 0; font-size: 1rem; }
+  .tile, .card { break-inside: avoid; border-color: #bbb; }
+  .table-wrap { overflow: visible; }
+  th, td { white-space: normal; }
+  .seg { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+  .legend i { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+}
+</style>
+</head>
+<body>
+<div class="viz-root">
+<div class="wrap">
+  <header>
+    <h1>Team metrics</h1>
+    <p>Where errors were caught, per project and per activity. Generated __GENERATED__ by <code>bin/metrics</code>.</p>
+  </header>
+  <div class="controls">
+    <label for="project">Project</label>
+    <select id="project"></select>
+    <button type="button" id="print">Print</button>
+  </div>
+  <p class="print-title" id="print-title"></p>
+  <section class="tiles" id="tiles" aria-label="Totals"></section>
+  <section class="card">
+    <h2>Where errors were caught</h2>
+    <p>Each bar adds the review findings, the files that failed the read-back, the problems found in manual tests and the errors that reached production.</p>
+    <div class="legend" id="legend"></div>
+    <div class="bars" id="bars"></div>
+  </section>
+  <section class="card">
+    <h2>Projects</h2>
+    <div class="table-wrap"><table id="projects"></table></div>
+  </section>
+  <section class="card">
+    <h2>Activities</h2>
+    <div class="table-wrap"><table id="activities"></table></div>
+  </section>
+  <footer>Data: <code>metrics/&lt;project&gt;.csv</code>. Review findings count high, medium and low; information-only notes are left out. Budget: hours from plan approval to delivery, tokens and cost as reported by the tools; an empty value means unknown.</footer>
+</div>
+<div class="tip" id="tip" role="tooltip"></div>
+</div>
+<script>
+const DATA = __DATA__;
+const SERIES = [
+  { key: "review", label: "Review findings", color: "var(--series-1)" },
+  { key: "readback", label: "Read-back failures", color: "var(--series-2)" },
+  { key: "manual", label: "Manual test findings", color: "var(--series-3)" },
+  { key: "production", label: "Errors in production", color: "var(--series-4)" },
+];
+const caught = (r) => ({
+  review: r.review_high + r.review_medium + r.review_low,
+  readback: r.readback_failures,
+  manual: r.manual_findings,
+  production: r.production_errors,
+});
+const sum = (rows, f) => rows.reduce((t, r) => t + f(r), 0);
+// Budget values may be unknown (null): sum only the known ones and say how many are missing.
+const known = (rows, key) => rows.filter((r) => r[key] !== null && r[key] !== undefined);
+const budget = (rows, key, digits) => {
+  const k = known(rows, key);
+  if (!k.length) return "unknown";
+  const total = sum(k, (r) => r[key]);
+  const text = digits === undefined ? total.toLocaleString("en-US") : total.toFixed(digits);
+  return k.length < rows.length ? `${text} (${rows.length - k.length} unknown)` : text;
+};
+const cell = (v, digits) => (v === null || v === undefined ? "—" : digits === undefined ? v.toLocaleString("en-US") : v.toFixed(digits));
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+// Every project with a file is an entry, even before its first activity.
+const projects = __PROJECTS__;
+const select = document.getElementById("project");
+select.innerHTML = `<option value="">All projects (${projects.length})</option>` +
+  projects.map((p) => `<option value="${esc(p)}">${esc(p)}</option>`).join("");
+try { const saved = localStorage.getItem("metrics-project"); if (saved && projects.includes(saved)) select.value = saved; } catch {}
+
+document.getElementById("legend").innerHTML =
+  SERIES.map((s) => `<span><i style="background:${s.color}"></i>${s.label}</span>`).join("");
+
+const tip = document.getElementById("tip");
+function showTip(event, text) {
+  tip.textContent = text; tip.style.display = "block";
+  const x = Math.min(event.clientX + 12, innerWidth - tip.offsetWidth - 8);
+  tip.style.left = x + "px"; tip.style.top = (event.clientY + 14) + "px";
+}
+
+function render() {
+  const project = select.value;
+  try { localStorage.setItem("metrics-project", project); } catch {}
+  document.getElementById("print").textContent = project ? `Print ${project}` : "Print all projects";
+  document.getElementById("print-title").textContent = `Project: ${project || "all projects"}. Generated __GENERATED__.`;
+  const rows = DATA.filter((r) => !project || r.project === project);
+  const before = sum(rows, (r) => { const c = caught(r); return c.review + c.readback + c.manual; });
+  const prod = sum(rows, (r) => r.production_errors);
+  const tiles = [
+    [rows.length, "Activities", project ? project : `${projects.length} project(s)`],
+    [before, "Errors caught before production", `${sum(rows, (r) => caught(r).review)} in reviews, ${sum(rows, (r) => r.readback_failures)} in read-backs, ${sum(rows, (r) => r.manual_findings)} in manual tests`],
+    [prod, "Errors that reached production", prod ? "Each one deserves a lesson in memory" : "None recorded"],
+    [sum(rows, (r) => r.questions), "Questions before starting", `${sum(rows, (r) => r.plan_changes)} changed the plan`],
+    [budget(rows, "cost_usd", 2) === "unknown" ? "—" : "$" + budget(rows, "cost_usd", 2), "Cost (USD)", `${budget(rows, "duration_hours", 1)} hours, ${budget(rows, "tokens")} tokens`],
+  ];
+  document.getElementById("tiles").innerHTML = tiles.map(([v, l, d]) =>
+    `<div class="tile"><div class="value">${v}</div><div class="label">${l}</div><div class="detail">${esc(d)}</div></div>`).join("");
+
+  // One bar per project, or per activity when a project is selected.
+  const groups = project
+    ? rows.map((r) => ({ name: `${r.activity} ${r.name}`, values: caught(r) }))
+    : projects.map((p) => {
+        const pr = DATA.filter((r) => r.project === p);
+        return { name: p, count: pr.length, values: Object.fromEntries(SERIES.map((s) => [s.key, sum(pr, (r) => caught(r)[s.key])])) };
+      });
+  const max = Math.max(1, ...groups.map((g) => SERIES.reduce((t, s) => t + g.values[s.key], 0)));
+  const bars = document.getElementById("bars");
+  bars.innerHTML = groups.length ? groups.map((g) => {
+    const total = SERIES.reduce((t, s) => t + g.values[s.key], 0);
+    const segs = SERIES.filter((s) => g.values[s.key] > 0).map((s) =>
+      `<div class="seg" tabindex="0" style="flex:0 0 ${(g.values[s.key] / max) * 100}%;background:${s.color}" data-tip="${esc(g.name)}: ${g.values[s.key]} ${s.label.toLowerCase()}" aria-label="${esc(g.name)}: ${g.values[s.key]} ${s.label.toLowerCase()}"></div>`).join("");
+    return `<div class="bar-row"><span class="name" title="${esc(g.name)}">${esc(g.name)}</span><div class="track">${segs || `<span class="empty">${g.count === 0 ? "No activities yet" : "No errors recorded"}</span>`}</div><span class="total">${total}</span></div>`;
+  }).join("") : '<p class="empty">No activities recorded yet. Add a row to metrics/&lt;project&gt;.csv and run bin/metrics.</p>';
+  for (const seg of bars.querySelectorAll(".seg")) {
+    seg.addEventListener("mousemove", (e) => showTip(e, seg.dataset.tip));
+    seg.addEventListener("mouseleave", () => (tip.style.display = "none"));
+    seg.addEventListener("focus", () => { const r = seg.getBoundingClientRect(); showTip({ clientX: r.left, clientY: r.bottom }, seg.dataset.tip); });
+    seg.addEventListener("blur", () => (tip.style.display = "none"));
+  }
+
+  const pRows = (project ? [project] : projects).map((p) => {
+    const pr = DATA.filter((r) => r.project === p);
+    const last = pr.map((r) => r.date).sort().pop() || "";
+    const pe = sum(pr, (r) => r.production_errors);
+    return `<tr><td>${esc(p)}</td><td>${pr.length}</td><td>${sum(pr, (r) => r.review_high)} / ${sum(pr, (r) => r.review_medium)} / ${sum(pr, (r) => r.review_low)}</td><td>${sum(pr, (r) => r.readback_failures)}</td><td>${sum(pr, (r) => r.manual_findings)}</td><td>${sum(pr, (r) => r.questions)} / ${sum(pr, (r) => r.plan_changes)}</td><td${pe ? ' class="prod"' : ""}>${pe}</td><td>${esc(budget(pr, "duration_hours", 1))}</td><td>${esc(budget(pr, "tokens"))}</td><td>${esc(budget(pr, "cost_usd", 2))}</td><td class="text">${esc(last)}</td></tr>`;
+  }).join("");
+  document.getElementById("projects").innerHTML =
+    `<thead><tr><th>Project</th><th>Activities</th><th>Review (H / M / L)</th><th>Read-back failures</th><th>Manual test findings</th><th>Questions / plan changes</th><th>Production errors</th><th>Hours</th><th>Tokens</th><th>Cost (USD)</th><th class="text">Last activity</th></tr></thead><tbody>${pRows}</tbody>`;
+
+  const aRows = [...rows].sort((a, b) => b.date.localeCompare(a.date)).map((r) =>
+    `<tr><td>${esc(r.project)}</td><td class="text">${esc(r.activity)} ${esc(r.name)}</td><td class="text">${esc(r.date)}</td><td>${r.review_high} / ${r.review_medium} / ${r.review_low}</td><td>${r.readback_failures}</td><td>${r.manual_findings}</td><td>${r.questions} / ${r.plan_changes}</td><td${r.production_errors ? ' class="prod"' : ""}>${r.production_errors}</td><td>${cell(r.duration_hours, 1)}</td><td>${cell(r.tokens)}</td><td>${cell(r.cost_usd, 2)}</td><td class="notes">${esc(r.notes)}</td></tr>`).join("");
+  document.getElementById("activities").innerHTML =
+    `<thead><tr><th>Project</th><th class="text">Activity</th><th class="text">Date</th><th>Review (H / M / L)</th><th>Read-back</th><th>Manual</th><th>Questions / plan changes</th><th>Production</th><th>Hours</th><th>Tokens</th><th>Cost (USD)</th><th class="text">Notes</th></tr></thead><tbody>${aRows || '<tr><td class="text" colspan="12">No activities yet.</td></tr>'}</tbody>`;
+}
+select.addEventListener("change", render);
+document.getElementById("print").addEventListener("click", () => window.print());
+render();
+</script>
+</body>
+</html>
+"""
+
+if __name__ == "__main__":
+    sys.exit(main())

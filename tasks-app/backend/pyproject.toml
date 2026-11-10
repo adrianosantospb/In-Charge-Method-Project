@@ -1,0 +1,22 @@
+# Tool settings. Dependencies are pinned in requirements.txt and requirements-test.txt.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+# Starlette suggests httpx2; the test client still works with httpx, which these tests use.
+filterwarnings = ["ignore:Using `httpx` with `starlette.testclient`"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S105", "S106"]
+
+[tool.ruff.lint.isort]
+known-third-party = ["alembic"]

@@ -1,0 +1,26 @@
+# Team settings for Codex sessions opened in this repository, including
+# projects/<project>/. Codex loads this file only when this folder is trusted.
+#
+# Model names live here (the fast model) and in the orchestrator, security_reviewer and
+# database_reviewer agent files (the strong model). docs_maintainer proposes model
+# changes; the user approves them before anyone edits a model.
+
+[features]
+# The team remembers through the versioned files in memory/, not Codex's own memories.
+memories = false
+
+[agents]
+max_depth = 2
+default_subagent_model = "<fast-model>"
+default_subagent_reasoning_effort = "medium"
+
+[mcp_servers.memory]
+# Basic Memory over the team's memory files (see bin/memory). Only the reading tools are
+# exposed: memory is written to the files by Eva after the user approves it. Codex starts
+# without it if it cannot run, and the agents then read the files.
+command = "bash"
+args = ["-c", "exec \"$(git rev-parse --show-toplevel)/bin/memory\" mcp"]
+enabled_tools = ["bm_search", "bm_read", "bm_context", "bm_list", "bm_find"]
+required = false
+startup_timeout_sec = 60.0
+tool_timeout_sec = 60.0

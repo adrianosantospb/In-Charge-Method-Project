@@ -1,0 +1,8 @@
+# Secrets stay out of Git. Each part keeps its own rules in its own .gitignore.
+.env
+
+# Tools and editors
+node_modules/
+__pycache__/
+.venv/
+.DS_Store
