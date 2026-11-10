@@ -1,0 +1,33 @@
+# Tests: a throwaway database, then the backend and webapp test suites.
+# Backend: docker compose -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from backend-tests
+# Webapp:  docker compose -f docker-compose.test.yml run --rm --build webapp-tests
+name: tasks-test
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: tasks_test
+      POSTGRES_USER: tasks
+      POSTGRES_PASSWORD: test-only-password
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tasks -d tasks_test"]
+      interval: 2s
+      retries: 30
+
+  backend-tests:
+    build: { context: ./backend, target: test }
+    command: ["sh", "-c", "ruff check . && ruff format --check . && pytest"]
+    environment:
+      TASKS_DATABASE_URL: postgresql+psycopg://tasks:test-only-password@db:5432/tasks_test
+    depends_on:
+      db: { condition: service_healthy }
+
+  # Started only by "run webapp-tests". Without the profile, "up" would start it too, and
+  # its quick exit would stop the database before the backend tests ran.
+  webapp-tests:
+    profiles: ["webapp"]
+    build: { context: ./webapp, target: build }
+    command: ["sh", "-c", "npm run typecheck && npm test"]

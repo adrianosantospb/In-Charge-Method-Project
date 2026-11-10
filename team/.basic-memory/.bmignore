@@ -1,0 +1,24 @@
+# Basic Memory indexes only memory/ and the projects' memory/ and repos/ notes.
+# Basic Memory reads these patterns as a set, so "!" exceptions do not work here:
+# list everything else to leave out.
+/AGENTS.md
+/README.md
+/LICENSE
+/bin
+/docs
+/scripts
+/templates
+/instructions
+/projects/README.md
+/projects/*/AGENTS.md
+/projects/*/repos.toml
+/metrics
+
+# Hidden files, environments and Basic Memory's own files
+.*
+env
+venv
+*.db
+*.db-shm
+*.db-wal
+config.json

@@ -1,0 +1,12 @@
+{
+  "userIgnoreFilters": [
+    "env/",
+    "bin/",
+    "scripts/",
+    "instructions/",
+    "docs/method/"
+  ],
+  "alwaysUpdateLinks": false,
+  "newFileLocation": "folder",
+  "newFileFolderPath": "memory"
+}

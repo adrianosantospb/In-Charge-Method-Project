@@ -1,0 +1,4 @@
+{
+  "_comment": "USD per million tokens, by model name as Codex records it in turn_context. Fill from the provider's price page and note the date. Example entry: \"model-name\": {\"input\": 0.0, \"cached_input\": 0.0, \"output\": 0.0}",
+  "_updated": ""
+}

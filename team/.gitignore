@@ -1,0 +1,10 @@
+# Basic Memory: the index stays on this computer; the ignore rules are shared.
+.basic-memory/*
+!.basic-memory/.bmignore
+
+# Obsidian: share the vault settings, not the window layout or caches.
+.obsidian/*
+!.obsidian/app.json
+!.obsidian/graph.json
+
+.env

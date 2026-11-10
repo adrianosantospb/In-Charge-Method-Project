@@ -1,0 +1,58 @@
+{
+  "collapse-filter": false,
+  "search": "path:memory OR path:projects",
+  "showTags": false,
+  "showAttachments": false,
+  "hideUnresolved": false,
+  "showOrphans": true,
+  "collapse-color-groups": false,
+  "colorGroups": [
+    {
+      "query": "path:memory/agents",
+      "color": {
+        "a": 1,
+        "rgb": 5209343
+      }
+    },
+    {
+      "query": "path:memory/team",
+      "color": {
+        "a": 1,
+        "rgb": 3122027
+      }
+    },
+    {
+      "query": "path:activities",
+      "color": {
+        "a": 1,
+        "rgb": 14721838
+      }
+    },
+    {
+      "query": "path:projects/tasks-app/repos",
+      "color": {
+        "a": 1,
+        "rgb": 12603350
+      }
+    },
+    {
+      "query": "path:projects/tasks-app/memory",
+      "color": {
+        "a": 1,
+        "rgb": 14834780
+      }
+    }
+  ],
+  "collapse-display": false,
+  "showArrow": true,
+  "textFadeMultiplier": 0,
+  "nodeSizeMultiplier": 1.2,
+  "lineSizeMultiplier": 1,
+  "collapse-forces": true,
+  "centerStrength": 0.5,
+  "repelStrength": 12,
+  "linkStrength": 1,
+  "linkDistance": 200,
+  "scale": 1,
+  "close": false
+}

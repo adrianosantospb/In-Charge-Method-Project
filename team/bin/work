@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Opens a Codex session for a project, with its repositories as writable folders.
+#
+#   bin/work <project> [codex options]   start the Codex CLI
+#   bin/work <project> --folders         list the folders, for a Codex App project
+#   bin/work --list                      list the projects
+set -euo pipefail
+
+TEAM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [[ "${1:-}" == "--list" || $# -eq 0 ]]; then
+  echo "Projects:"
+  for dir in "$TEAM_DIR"/projects/*/; do
+    [[ -f "$dir/repos.toml" ]] && echo "  $(basename "$dir")"
+  done
+  [[ $# -eq 0 ]] && { echo "Usage: bin/work <project> [codex options]" >&2; exit 2; }
+  exit 0
+fi
+
+project="$1"; shift
+project_dir="$TEAM_DIR/projects/$project"
+if [[ ! -f "$project_dir/repos.toml" ]]; then
+  echo "Unknown project: $project (no projects/$project/repos.toml)" >&2
+  exit 2
+fi
+
+repos=()
+while IFS= read -r path; do
+  path="${path/#\~/$HOME}"
+  if [[ ! -d "$path" ]]; then
+    echo "Repository not found: $path (edit projects/$project/repos.toml)" >&2
+    exit 1
+  fi
+  repos+=("$path")
+done < <(sed -n 's/^[[:space:]]*path[[:space:]]*=[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$project_dir/repos.toml")
+
+if [[ "${1:-}" == "--folders" ]]; then
+  echo "Main folder:"
+  echo "  $project_dir"
+  echo "Additional folders:"
+  printf '  %s\n' "${repos[@]}"
+  exit 0
+fi
+
+args=()
+for path in "${repos[@]}"; do
+  args+=(--add-dir "$path")
+done
+
+cd "$project_dir"
+exec codex "${args[@]}" "$@"
