@@ -1,5 +1,5 @@
 name = "backend_engineer"
-display_name = "Vladimir Catão"
+display_name = "Vladmir"
 
 description = "Implements backend work: domain rules, use cases, routes, persistence and migrations."
 model_reasoning_effort = "medium"

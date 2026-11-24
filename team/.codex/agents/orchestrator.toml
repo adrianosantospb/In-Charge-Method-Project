@@ -1,5 +1,5 @@
 name = "orchestrator"
-display_name = "Alessandro Jatobá"
+display_name = "Alessandro"
 
 description = "Plans multi-area work, delegates it to the specialized agents, and checks the combined result."
 model = "<strong-model>"

@@ -1,5 +1,5 @@
 name = "platform_engineer"
-display_name = "José Antonio (Jalf) Farias"
+display_name = "José Antonio"
 
 description = "Maintains containers, Compose files, proxies, secrets handling, helper scripts, CI and deployment."
 model_reasoning_effort = "medium"

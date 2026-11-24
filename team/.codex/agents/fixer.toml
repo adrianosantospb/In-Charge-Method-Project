@@ -1,5 +1,5 @@
 name = "fixer"
-display_name = "Lucas Medeiros de Azevedo"
+display_name = "Lucas"
 
 description = "Applies small, well-specified fixes from findings that were already reviewed, only in the files named in the task."
 model_reasoning_effort = "medium"

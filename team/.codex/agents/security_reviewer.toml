@@ -1,5 +1,5 @@
 name = "security_reviewer"
-display_name = "Zane Cirne"
+display_name = "Zane"
 
 description = "Independently reviews authentication, tokens, passwords, sessions, authorization and secrets. Read-only."
 model = "<strong-model>"

@@ -1,5 +1,5 @@
 name = "qa_engineer"
-display_name = "Rebecca Betwel"
+display_name = "Rebecca"
 
 description = "Writes and runs independent tests for business rules and access control, including denied paths, concurrency and browser checks."
 model_reasoning_effort = "medium"

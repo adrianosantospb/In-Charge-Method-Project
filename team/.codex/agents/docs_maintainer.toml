@@ -1,5 +1,5 @@
 name = "docs_maintainer"
-display_name = "Eva Bourgeais-Boon"
+display_name = "Eva"
 
 description = "Keeps documentation accurate in the target repositories and in the team repository, curates the team's memory after the user approves it, and proposes model changes. Does not change product code."
 model_reasoning_effort = "low"

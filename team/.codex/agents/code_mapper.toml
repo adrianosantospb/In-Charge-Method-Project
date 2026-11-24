@@ -1,5 +1,5 @@
 name = "code_mapper"
-display_name = "Roberta Macedo"
+display_name = "Roberta"
 
 description = "Finds where things are implemented and how they connect. Read-only; returns paths and short notes."
 model_reasoning_effort = "low"
